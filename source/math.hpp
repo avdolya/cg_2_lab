@@ -4,6 +4,27 @@
 
 namespace math {
 
+struct Vector3 {
+	float x, y, z;
+
+	Vector3 operator-(const Vector3& other) const {
+		return { x - other.x, y - other.y, z - other.z };
+	}
+
+	static Vector3 cross(const Vector3& a, const Vector3& b) {
+		return {
+			a.y * b.z - a.z * b.y,
+			a.z * b.x - a.x * b.z,
+			a.x * b.y - a.y * b.x,
+		};
+	}
+
+	static Vector3 normalize(const Vector3& v) {
+		const float length = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+		return { v.x / length, v.y / length, v.z / length };
+	}
+};
+
 struct Matrix4 {
 	float elements[4][4];
 

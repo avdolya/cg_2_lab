@@ -12,12 +12,19 @@ namespace application {
 
 struct Vertex {
 	float position[3];
-	float color[3];
+	float normal[3];
 };
 
+
 struct GlobalUniforms {
-	float matrix[4][4];
-	float color[4];
+	float view_projection[4][4];
+	float model[4][4];
+	float camera_position[4];  // где камера
+	float ambient[4];          // rgb = color, w = intensity
+	float light_direction[4];  // xyz, куда светит свет
+	float light_color[4];      // rgb = color, w = intensity
+	float albedo[4];           // rgb
+	float specular[4];         // цвет блика + shininess в 4-м числе
 };
 
 VkBuffer vk_vertex_buffer;
@@ -66,20 +73,47 @@ VkShaderModule loadShaderModule(const char path[]) {
 bool initialize() {
 	auto& context = graphics::internal::context;
 
-	Vertex vertices[] = {
-		{ { -0.5f, -0.5f, -0.5f } },
-		{ { +0.5f, -0.5f, -0.5f } },
-		{ { +0.5f, +0.5f, -0.5f } },
-		{ { -0.5f, +0.5f, -0.5f } },
-		{ { -0.5f, -0.5f, +0.5f } },
-		{ { +0.5f, -0.5f, +0.5f } },
-		{ { +0.5f, +0.5f, +0.5f } },
-		{ { -0.5f, +0.5f, +0.5f } },
+	const math::Vector3 corners[8] = {
+		{ -0.5f, -0.5f, -0.5f },
+		{ +0.5f, -0.5f, -0.5f },
+		{ +0.5f, +0.5f, -0.5f },
+		{ -0.5f, +0.5f, -0.5f },
+		{ -0.5f, -0.5f, +0.5f },
+		{ +0.5f, -0.5f, +0.5f },
+		{ +0.5f, +0.5f, +0.5f },
+		{ -0.5f, +0.5f, +0.5f },
 	};
 
-	for (Vertex& vertex : vertices) {
-		for (int i = 0; i < 3; ++i) {
-			vertex.color[i] = vertex.position[i] + 0.5f;
+	const int faces[6][4] = {
+		{ 0, 1, 2, 3 },
+		{ 5, 4, 7, 6 },
+		{ 4, 0, 3, 7 },
+		{ 1, 5, 6, 2 },
+		{ 1, 0, 4, 5 },
+		{ 3, 2, 6, 7 },
+	};
+
+	Vertex vertices[24];
+	uint32_t indices[36];
+
+	for (int face = 0; face < 6; ++face) {
+		const math::Vector3& a = corners[faces[face][0]];
+		const math::Vector3& b = corners[faces[face][1]];
+		const math::Vector3& c = corners[faces[face][2]];
+		const math::Vector3 normal = math::Vector3::normalize(math::Vector3::cross(c - a, b - a));
+
+		for (int corner = 0; corner < 4; ++corner) {
+			const math::Vector3& position = corners[faces[face][corner]];
+			vertices[face * 4 + corner] = {
+				{ position.x, position.y, position.z },
+				{ normal.x, normal.y, normal.z },
+			};
+		}
+
+		const uint32_t first = face * 4;
+		const uint32_t face_indices[6] = { 0, 1, 2, 0, 2, 3 };
+		for (int i = 0; i < 6; ++i) {
+			indices[face * 6 + i] = first + face_indices[i];
 		}
 	}
 
@@ -110,15 +144,6 @@ bool initialize() {
 	}
 
 	memcpy(vk_vertex_buffer_memory, vertices, sizeof(vertices));
-
-	const uint32_t indices[] = {
-		0, 1, 2,   0, 2, 3,
-		5, 4, 7,   5, 7, 6,
-		4, 0, 3,   4, 3, 7,
-		1, 5, 6,   1, 6, 2,
-		1, 0, 4,   1, 4, 5,
-		3, 2, 6,   3, 6, 7,
-	};
 
 	const VkBufferCreateInfo index_buffer = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -297,7 +322,7 @@ bool initialize() {
 			.location = 1,
 			.binding = 0,
 			.format = VK_FORMAT_R32G32B32_SFLOAT,
-			.offset = offsetof(Vertex, color),
+			.offset = offsetof(Vertex, normal),
 		},
 	};
 
@@ -422,6 +447,10 @@ int projection_type = PROJECTION_PERSPECTIVE;
 float fov_degrees = 60.0f;
 float ortho_height = 1.5f;
 
+float camera_position[3] = { 0.0f, 0.0f, -3.0f };
+float camera_yaw_degrees = 0.0f;
+float camera_pitch_degrees = 0.0f;
+
 float position[3] = { 0.0f, 0.0f, 0.0f };
 float rotation_degrees[3] = { 20.0f, 30.0f, 0.0f };
 float scale_xyz[3] = { 1.0f, 1.0f, 1.0f };
@@ -435,7 +464,16 @@ float trajectory_speed = 1.0f;
 float trajectory_radius = 1.0f;
 float trajectory_time = 0.0f;
 
-float color[3] = { 1.0f, 1.0f, 1.0f };
+float ambient_color[3] = { 1.0f, 1.0f, 1.0f };
+float ambient_intensity = 0.15f;
+
+float light_direction[3] = { 0.4f, 0.6f, 1.0f };
+float light_color[3] = { 1.0f, 1.0f, 1.0f };
+float light_intensity = 1.0f;
+
+float material_albedo[3] = { 0.8f, 0.3f, 0.3f };
+float material_specular[3] = { 1.0f, 1.0f, 1.0f };
+float material_shininess = 32.0f;
 
 double previous_time = 0.0;
 
@@ -453,6 +491,11 @@ void drawInterface() {
 		ImGui::SliderFloat("View height", &ortho_height, 0.5f, 5.0f);
 	}
 
+	ImGui::SeparatorText("Camera");
+	ImGui::SliderFloat3("Position##camera", camera_position, -10.0f, 10.0f);
+	ImGui::SliderFloat("Yaw", &camera_yaw_degrees, -180.0f, 180.0f, "%.0f deg");
+	ImGui::SliderFloat("Pitch", &camera_pitch_degrees, -89.0f, 89.0f, "%.0f deg");
+
 	ImGui::SeparatorText("Transform");
 	ImGui::SliderFloat3("Position", position, -2.0f, 2.0f);
 	ImGui::SliderFloat3("Rotation", rotation_degrees, -180.0f, 180.0f, "%.0f deg");
@@ -467,13 +510,29 @@ void drawInterface() {
 	ImGui::SliderFloat("Speed##trajectory", &trajectory_speed, 0.1f, 5.0f);
 	ImGui::SliderFloat("Radius", &trajectory_radius, 0.0f, 2.0f);
 
-	ImGui::SeparatorText("Color");
-	ImGui::ColorEdit3("Color", color);
+	ImGui::SeparatorText("Directional light");
+	ImGui::SliderFloat3("Direction", light_direction, -1.0f, 1.0f);
+	ImGui::ColorEdit3("Color##light", light_color);
+	ImGui::SliderFloat("Intensity##light", &light_intensity, 0.0f, 5.0f);
+
+	ImGui::SeparatorText("Ambient light");
+	ImGui::ColorEdit3("Color##ambient", ambient_color);
+	ImGui::SliderFloat("Intensity##ambient", &ambient_intensity, 0.0f, 1.0f);
+
+	ImGui::SeparatorText("Material");
+	ImGui::ColorEdit3("Albedo", material_albedo);
+	ImGui::ColorEdit3("Specular color", material_specular);
+	ImGui::SliderFloat("Shininess", &material_shininess, 1.0f, 256.0f, "%.0f",
+	                   ImGuiSliderFlags_Logarithmic);
 
 	if (ImGui::Button("Reset")) {
 		projection_type = PROJECTION_PERSPECTIVE;
 		fov_degrees = 60.0f;
 		ortho_height = 1.5f;
+		camera_position[0] = camera_position[1] = 0.0f;
+		camera_position[2] = -3.0f;
+		camera_yaw_degrees = 0.0f;
+		camera_pitch_degrees = 0.0f;
 		position[0] = position[1] = position[2] = 0.0f;
 		rotation_degrees[0] = 20.0f;
 		rotation_degrees[1] = 30.0f;
@@ -486,7 +545,18 @@ void drawInterface() {
 		trajectory_speed = 1.0f;
 		trajectory_radius = 1.0f;
 		trajectory_time = 0.0f;
-		color[0] = color[1] = color[2] = 1.0f;
+		light_direction[0] = 0.4f;
+		light_direction[1] = 0.6f;
+		light_direction[2] = 1.0f;
+		light_color[0] = light_color[1] = light_color[2] = 1.0f;
+		light_intensity = 1.0f;
+		ambient_color[0] = ambient_color[1] = ambient_color[2] = 1.0f;
+		ambient_intensity = 0.15f;
+		material_albedo[0] = 0.8f;
+		material_albedo[1] = 0.3f;
+		material_albedo[2] = 0.3f;
+		material_specular[0] = material_specular[1] = material_specular[2] = 1.0f;
+		material_shininess = 32.0f;
 	}
 
 	ImGui::End();
@@ -520,7 +590,10 @@ void update(double time) {
 		math::Matrix4::rotationZ(rotation_degrees[2] * degrees_to_radians) *
 		math::Matrix4::scale(scale_xyz[0], scale_xyz[1], scale_xyz[2]);
 
-	const math::Matrix4 view = math::Matrix4::translation(0, 0, 3);
+	const math::Matrix4 view =
+		math::Matrix4::rotationX(-camera_pitch_degrees * degrees_to_radians) *
+		math::Matrix4::rotationY(-camera_yaw_degrees * degrees_to_radians) *
+		math::Matrix4::translation(-camera_position[0], -camera_position[1], -camera_position[2]);
 
 	const float aspect = float(context.swapchain_extent.width) /
 	                     float(context.swapchain_extent.height);
@@ -528,12 +601,26 @@ void update(double time) {
 		? math::Matrix4::perspective(fov_degrees * degrees_to_radians, aspect, 0.1f, 100.0f)
 		: math::Matrix4::orthographic(ortho_height, aspect, 0.1f, 100.0f);
 
-	const math::Matrix4 matrix = projection * view * model;
+	const math::Matrix4 view_projection = projection * view;
 
-	memcpy(vk_uniform_buffer_global_memory->matrix, matrix.elements, sizeof(matrix.elements));
+	GlobalUniforms& uniforms = *vk_uniform_buffer_global_memory;
 
-	const float color_rgba[4] = { color[0], color[1], color[2], 1.0f };
-	memcpy(vk_uniform_buffer_global_memory->color, color_rgba, sizeof(color_rgba));
+	memcpy(uniforms.view_projection, view_projection.elements, sizeof(view_projection.elements));
+	memcpy(uniforms.model, model.elements, sizeof(model.elements));
+
+	const float camera_position_xyzw[4] = { camera_position[0], camera_position[1], camera_position[2], 1.0f };
+	const float ambient_rgba[4] = { ambient_color[0], ambient_color[1], ambient_color[2], ambient_intensity };
+	const float light_direction_xyzw[4] = { light_direction[0], light_direction[1], light_direction[2], 0.0f };
+	const float light_color_rgba[4] = { light_color[0], light_color[1], light_color[2], light_intensity };
+	const float albedo_rgba[4] = { material_albedo[0], material_albedo[1], material_albedo[2], 1.0f };
+	const float specular_rgba[4] = { material_specular[0], material_specular[1], material_specular[2], material_shininess };
+
+	memcpy(uniforms.camera_position, camera_position_xyzw, sizeof(camera_position_xyzw));
+	memcpy(uniforms.ambient, ambient_rgba, sizeof(ambient_rgba));
+	memcpy(uniforms.light_direction, light_direction_xyzw, sizeof(light_direction_xyzw));
+	memcpy(uniforms.light_color, light_color_rgba, sizeof(light_color_rgba));
+	memcpy(uniforms.albedo, albedo_rgba, sizeof(albedo_rgba));
+	memcpy(uniforms.specular, specular_rgba, sizeof(specular_rgba));
 }
 
 void render(const graphics::internal::FrameData& fd) {
